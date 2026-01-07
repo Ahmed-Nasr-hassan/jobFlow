@@ -6,6 +6,8 @@ import time
 from io import StringIO
 from typing import AsyncIterator
 
+from pathlib import Path
+
 from ...domain import (
     ScriptExecutor,
     ScriptConfig,
@@ -14,6 +16,7 @@ from ...domain import (
     LogSink,
     LogLevel,
     ScriptExecutionException,
+    FileProvider,
 )
 
 
@@ -23,6 +26,18 @@ class LambdaExecutor(ScriptExecutor):
     This executor runs scripts in the same process, capturing
     stdout/stderr and handling exceptions.
     """
+
+    def __init__(
+        self, file_provider: FileProvider | None = None, temp_directory: str = "/tmp"
+    ) -> None:
+        """Initialize the executor.
+
+        Args:
+            file_provider: Optional file provider for staging required files
+            temp_directory: Directory for staging files (default: /tmp for Lambda)
+        """
+        self._file_provider = file_provider
+        self._temp_directory = temp_directory
 
     def execute(
         self,
@@ -44,12 +59,17 @@ class LambdaExecutor(ScriptExecutor):
         start_time = time.time()
         stdout_capture = StringIO()
         stderr_capture = StringIO()
+        staged_files: list[Path] = []
 
         # Save original stdout/stderr
         original_stdout = sys.stdout
         original_stderr = sys.stderr
 
         try:
+            # Stage required files if file provider is available
+            if self._file_provider and config.file_requirements:
+                staged_files = self._stage_files(config, log_sink)
+            
             # Redirect stdout/stderr
             sys.stdout = stdout_capture
             sys.stderr = stderr_capture
@@ -120,7 +140,7 @@ class LambdaExecutor(ScriptExecutor):
 
             duration = time.time() - start_time
 
-            return ExecutionResult(
+            result = ExecutionResult(
                 status=status,
                 exit_code=exit_code,
                 stdout=stdout_content,
@@ -129,12 +149,23 @@ class LambdaExecutor(ScriptExecutor):
                 metadata=config.metadata,
             )
 
+            # Upload output files if file provider is available
+            if self._file_provider and config.file_outputs:
+                self._upload_output_files(config, log_sink)
+
+            return result
+
         except Exception as e:
             duration = time.time() - start_time
             # Restore stdout/stderr in case of error
             sys.stdout = original_stdout
             sys.stderr = original_stderr
             raise ScriptExecutionException(f"In-process execution failed: {str(e)}") from e
+        finally:
+            # Cleanup staged files
+            if self._file_provider:
+                for staged_file in staged_files:
+                    self._file_provider.cleanup(staged_file)
 
     async def execute_async(
         self,
@@ -169,4 +200,113 @@ class LambdaExecutor(ScriptExecutor):
 
         # Yield final result
         yield result
+
+    def _stage_files(self, config: ScriptConfig, log_sink: LogSink | None = None) -> list[Path]:
+        """Stage required files before execution in Lambda context.
+
+        Files are staged to /tmp (or configured temp_directory) which is
+        the writable space in Lambda environment.
+
+        Args:
+            config: Script configuration
+            log_sink: Optional log sink for logging file staging
+
+        Returns:
+            List of staged file paths for cleanup
+
+        Raises:
+            ScriptExecutionException: If file staging fails
+        """
+        staged_files: list[Path] = []
+        # Use temp_directory (default /tmp) for Lambda, or working_directory if specified
+        working_dir = (
+            Path(config.working_directory)
+            if config.working_directory
+            else Path(self._temp_directory)
+        )
+
+        if not config.file_requirements:
+            return staged_files
+
+        for file_req in config.file_requirements:
+            try:
+                destination = working_dir / file_req.destination
+                staged_path = self._file_provider.get_file(file_req.source, str(destination))
+                staged_files.append(staged_path)
+
+                if log_sink:
+                    log_sink.emit(
+                        LogLevel.INFO, f"Staged file: {file_req.source} -> {destination}"
+                    )
+            except FileNotFoundError as e:
+                if file_req.required:
+                    raise ScriptExecutionException(f"Required file not found: {file_req.source}") from e
+                if log_sink:
+                    log_sink.emit(
+                        LogLevel.WARNING, f"Optional file not found (skipping): {file_req.source}"
+                    )
+            except Exception as e:
+                if file_req.required:
+                    raise ScriptExecutionException(
+                        f"Failed to stage required file {file_req.source}: {str(e)}"
+                    ) from e
+
+        return staged_files
+
+    def _upload_output_files(self, config: ScriptConfig, log_sink: LogSink | None = None) -> None:
+        """Upload output files after execution in Lambda context.
+
+        Args:
+            config: Script configuration
+            log_sink: Optional log sink for logging file uploads
+
+        Raises:
+            ScriptExecutionException: If required output file upload fails
+        """
+        # Use temp_directory (default /tmp) for Lambda, or working_directory if specified
+        working_dir = (
+            Path(config.working_directory)
+            if config.working_directory
+            else Path(self._temp_directory)
+        )
+
+        if not config.file_outputs:
+            return
+
+        for file_output in config.file_outputs:
+            try:
+                source_path = working_dir / file_output.source
+
+                if not source_path.exists():
+                    if file_output.required:
+                        raise ScriptExecutionException(
+                            f"Required output file not found: {file_output.source}"
+                        )
+                    # Non-required outputs are skipped
+                    if log_sink:
+                        log_sink.emit(
+                            LogLevel.WARNING,
+                            f"Optional output file not found (skipping): {file_output.source}",
+                        )
+                    continue
+
+                # Upload file to destination
+                uploaded_path = self._file_provider.put_file(source_path, file_output.destination)
+
+                if log_sink:
+                    log_sink.emit(
+                        LogLevel.INFO,
+                        f"Uploaded output file: {file_output.source} -> {uploaded_path}",
+                    )
+            except Exception as e:
+                if file_output.required:
+                    raise ScriptExecutionException(
+                        f"Failed to upload required output file {file_output.source}: {str(e)}"
+                    ) from e
+                # Non-required outputs log warning but don't fail
+                if log_sink:
+                    log_sink.emit(
+                        LogLevel.WARNING,
+                        f"Failed to upload optional output file {file_output.source}: {str(e)}",
+                    )
 

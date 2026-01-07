@@ -75,7 +75,7 @@ pip install -e .
 
 ```python
 from src.application import RunScriptUseCase
-from src.domain import ScriptConfig
+from src.domain import ScriptConfig, FileRequirement
 from src.infrastructure import LocalSubprocessExecutor, StdoutLogSink
 
 # Create executor and log sink
@@ -99,6 +99,159 @@ result = use_case.execute(config)
 print(f"Status: {result.status.value}")
 print(f"Exit Code: {result.exit_code}")
 print(f"Duration: {result.duration_seconds:.2f}s")
+```
+
+### File Access (Local, S3, URLs, etc.)
+
+Scripts can access files from **any source** (local, S3, HTTP/HTTPS URLs) and files are automatically staged in the executor's context (local filesystem, Lambda /tmp, etc.):
+
+```python
+from src.domain import ScriptConfig, FileRequirement
+from src.infrastructure import (
+    LocalSubprocessExecutor,
+    LambdaExecutor,
+    LocalFileProvider,
+    S3FileProvider,
+    HTTPFileProvider,
+    CompositeFileProvider,
+)
+
+# Create file providers for different sources
+local_provider = LocalFileProvider()
+s3_provider = S3FileProvider(bucket_name="my-bucket")
+http_provider = HTTPFileProvider()
+
+# Composite provider automatically routes based on source path format
+composite_provider = CompositeFileProvider(local_provider, s3_provider, http_provider)
+
+# Create executor with file provider
+executor = LocalSubprocessExecutor(file_provider=composite_provider)
+
+# Configure script with file requirements from ANY source
+config = ScriptConfig(
+    script_path="process_images.py",
+    working_directory="/tmp/work",
+    file_requirements=[
+        FileRequirement(
+            source="/data/input.csv",  # Local file
+            destination="input.csv",  # Where script expects it
+            required=True,
+        ),
+        FileRequirement(
+            source="s3://my-bucket/images/photo1.jpg",  # S3 file
+            destination="photo1.jpg",
+            required=True,
+        ),
+        FileRequirement(
+            source="https://example.com/images/photo2.jpg",  # HTTP URL
+            destination="photo2.jpg",
+            required=True,
+        ),
+        FileRequirement(
+            source="https://cdn.example.com/config.json",  # Optional file
+            destination="config.json",
+            required=False,  # Won't fail if missing
+        ),
+    ],
+)
+
+# Files are automatically:
+# 1. Downloaded from source (local/S3/URL)
+# 2. Staged in executor's context (working_directory or /tmp for Lambda)
+# 3. Available to script during execution
+# 4. Uploaded to destinations after execution (if file_outputs specified)
+# 5. Cleaned up after execution
+result = use_case.execute(config)
+```
+
+### Bidirectional File Access (Download + Upload)
+
+The library supports **dual interaction**: download input files AND upload output files:
+
+```python
+from src.domain import ScriptConfig, FileRequirement, FileOutput
+from src.infrastructure import (
+    LocalSubprocessExecutor,
+    CompositeFileProvider,
+    LocalFileProvider,
+    S3FileProvider,
+    HTTPFileProvider,
+)
+
+# Create composite provider
+providers = CompositeFileProvider(
+    LocalFileProvider(),
+    S3FileProvider(bucket_name="my-bucket"),
+    HTTPFileProvider(),
+)
+
+executor = LocalSubprocessExecutor(file_provider=providers)
+
+# Configure with both inputs and outputs
+config = ScriptConfig(
+    script_path="process_images.py",
+    working_directory="/tmp/work",
+    # Download input files from any source
+    file_requirements=[
+        FileRequirement(
+            source="https://example.com/input1.jpg",  # Download from URL
+            destination="input1.jpg",
+        ),
+        FileRequirement(
+            source="s3://bucket/input2.jpg",  # Download from S3
+            destination="input2.jpg",
+        ),
+    ],
+    # Upload output files to any destination
+    file_outputs=[
+        FileOutput(
+            source="output1.jpg",  # File created by script
+            destination="s3://bucket/results/output1.jpg",  # Upload to S3
+            required=True,
+        ),
+        FileOutput(
+            source="output2.jpg",
+            destination="/backup/output2.jpg",  # Upload to local path
+            required=False,  # Optional - won't fail if missing
+        ),
+        FileOutput(
+            source="report.json",
+            destination="https://api.example.com/upload",  # Upload to HTTP endpoint
+            required=True,
+        ),
+    ],
+)
+
+# Complete workflow:
+# 1. Downloads input files (URL → local, S3 → local)
+# 2. Script executes and creates output files
+# 3. Uploads output files (local → S3, local → HTTP, local → local)
+# 4. Cleans up staged files
+result = use_case.execute(config)
+```
+
+### Executor Context-Aware File Staging
+
+Files are automatically staged in the executor's context:
+
+- **LocalSubprocessExecutor**: Files staged to `working_directory` (or current directory)
+- **LambdaExecutor**: Files staged to `/tmp` (Lambda's writable space) or `working_directory` if specified
+- **WorkerExecutor**: Files staged according to worker's context
+
+```python
+# Lambda executor automatically uses /tmp for file staging
+lambda_executor = LambdaExecutor(file_provider=composite_provider)
+
+config = ScriptConfig(
+    script_path="process.py",
+    # working_directory not needed - defaults to /tmp in Lambda
+    file_requirements=[
+        FileRequirement(
+            source="https://example.com/data.csv",  # Download from URL
+            destination="data.csv",  # Available at /tmp/data.csv in Lambda
+        ),
+    ],
+)
 ```
 
 ### Async Execution with Streaming
@@ -219,8 +372,9 @@ pytest --cov=src --cov-report=html
 src/
 ├── domain/              # Pure business logic
 │   ├── executor.py      # ScriptExecutor interface
+│   ├── file_provider.py # FileProvider interface
 │   ├── logging.py       # LogSink interface
-│   ├── models.py        # ExecutionResult, ScriptConfig
+│   ├── models.py        # ExecutionResult, ScriptConfig, FileRequirement
 │   └── exceptions.py    # Domain exceptions
 │
 ├── application/         # Use cases
@@ -228,6 +382,7 @@ src/
 │
 └── infrastructure/      # Adapters
     ├── executors/       # Executor implementations
+    ├── file_providers/   # File provider implementations
     └── logging/         # Log sink implementations
 ```
 
@@ -247,6 +402,28 @@ class DockerExecutor(ScriptExecutor):
         # Your async Docker execution logic
         async for item in ...:
             yield item
+```
+
+### Adding a New File Provider
+
+```python
+from src.domain import FileProvider
+from pathlib import Path
+
+class HTTPFileProvider(FileProvider):
+    def get_file(self, source_path: str, destination_path: str) -> Path:
+        # Download from HTTP/HTTPS URL
+        import urllib.request
+        urllib.request.urlretrieve(source_path, destination_path)
+        return Path(destination_path)
+    
+    async def get_file_async(self, source_path: str, destination_path: str) -> Path:
+        # Async download logic
+        pass
+    
+    def cleanup(self, path: Path) -> None:
+        # Clean up downloaded file
+        path.unlink()
 ```
 
 ### Adding a New Log Sink

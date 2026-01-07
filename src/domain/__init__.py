@@ -4,8 +4,9 @@ This layer contains no dependencies on infrastructure, frameworks, or external l
 """
 
 from .executor import ScriptExecutor
+from .file_provider import FileProvider
 from .logging import LogSink, LogLevel
-from .models import ExecutionResult, ScriptConfig
+from .models import ExecutionResult, ExecutionStatus, FileRequirement, FileOutput, ScriptConfig
 from .exceptions import (
     DomainException,
     ScriptExecutionException,
@@ -14,9 +15,13 @@ from .exceptions import (
 
 __all__ = [
     "ScriptExecutor",
+    "FileProvider",
     "LogSink",
     "LogLevel",
     "ExecutionResult",
+    "ExecutionStatus",
+    "FileRequirement",
+    "FileOutput",
     "ScriptConfig",
     "DomainException",
     "ScriptExecutionException",

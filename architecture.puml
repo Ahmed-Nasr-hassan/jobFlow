@@ -1,0 +1,265 @@
+@startuml JobFlow Architecture
+
+!define DOMAIN_COLOR #E8F5E9
+!define APPLICATION_COLOR #E3F2FD
+!define INFRASTRUCTURE_COLOR #FFF3E0
+!define INTERFACE_COLOR #F3E5F5
+
+package "Domain Layer" DOMAIN_COLOR {
+    abstract class ScriptExecutor {
+        +execute(config: ScriptConfig, log_sink: LogSink): ExecutionResult
+        +execute_async(config: ScriptConfig, log_sink: LogSink): AsyncIterator
+    }
+    
+    abstract class FileProvider {
+        +get_file(source: str, destination: str): Path
+        +get_file_async(source: str, destination: str): Path
+        +put_file(source: Path, destination: str): str
+        +put_file_async(source: Path, destination: str): str
+        +cleanup(path: Path): void
+    }
+    
+    abstract class LogSink {
+        +emit(level: LogLevel, message: str, metadata: dict): void
+        +close(): void
+    }
+    
+    enum LogLevel {
+        DEBUG
+        INFO
+        WARNING
+        ERROR
+        CRITICAL
+    }
+    
+    enum ExecutionStatus {
+        SUCCESS
+        FAILED
+        TIMEOUT
+        CANCELLED
+    }
+    
+    class ScriptConfig {
+        +script_path: str
+        +working_directory: str
+        +file_requirements: List[FileRequirement]
+        +file_outputs: List[FileOutput]
+        +environment_variables: dict
+        +timeout_seconds: int
+    }
+    
+    class FileRequirement {
+        +source: str
+        +destination: str
+        +required: bool
+    }
+    
+    class FileOutput {
+        +source: str
+        +destination: str
+        +required: bool
+    }
+    
+    class ExecutionResult {
+        +status: ExecutionStatus
+        +exit_code: int
+        +stdout: str
+        +stderr: str
+        +duration_seconds: float
+        +is_success: bool
+    }
+    
+    class DomainException
+    class ScriptExecutionException
+    class InvalidScriptException
+    
+    ScriptExecutor ..> ScriptConfig
+    ScriptExecutor ..> ExecutionResult
+    ScriptExecutor ..> LogSink
+    ScriptExecutor ..> ScriptExecutionException
+    
+    FileProvider ..> FileRequirement : uses
+    FileProvider ..> FileOutput : uses
+    
+    LogSink ..> LogLevel
+    ExecutionResult ..> ExecutionStatus
+    ScriptConfig ..> FileRequirement
+    ScriptConfig ..> FileOutput
+    
+    ScriptExecutionException --|> DomainException
+    InvalidScriptException --|> DomainException
+}
+
+package "Application Layer" APPLICATION_COLOR {
+    class RunScriptUseCase {
+        -executor: ScriptExecutor
+        -log_sink: LogSink
+        +execute(config: ScriptConfig): ExecutionResult
+        +execute_async(config: ScriptConfig): AsyncIterator
+    }
+    
+    RunScriptUseCase --> ScriptExecutor : uses
+    RunScriptUseCase --> LogSink : uses
+    RunScriptUseCase --> ScriptConfig
+    RunScriptUseCase --> ExecutionResult
+    RunScriptUseCase --> ScriptExecutionException
+}
+
+package "Infrastructure Layer - Executors" INFRASTRUCTURE_COLOR {
+    class LocalSubprocessExecutor {
+        -python_executable: str
+        -file_provider: FileProvider
+        +execute(config: ScriptConfig, log_sink: LogSink): ExecutionResult
+        +execute_async(config: ScriptConfig, log_sink: LogSink): AsyncIterator
+        -_stage_files(config: ScriptConfig, log_sink: LogSink): List[Path]
+        -_upload_output_files(config: ScriptConfig, log_sink: LogSink): void
+    }
+    
+    class LambdaExecutor {
+        -file_provider: FileProvider
+        -temp_directory: str
+        +execute(config: ScriptConfig, log_sink: LogSink): ExecutionResult
+        +execute_async(config: ScriptConfig, log_sink: LogSink): AsyncIterator
+        -_stage_files(config: ScriptConfig, log_sink: LogSink): List[Path]
+        -_upload_output_files(config: ScriptConfig, log_sink: LogSink): void
+    }
+    
+    class WorkerExecutor {
+        -worker_endpoint: str
+        +execute(config: ScriptConfig, log_sink: LogSink): ExecutionResult
+        +execute_async(config: ScriptConfig, log_sink: LogSink): AsyncIterator
+    }
+    
+    LocalSubprocessExecutor ..|> ScriptExecutor : implements
+    LambdaExecutor ..|> ScriptExecutor : implements
+    WorkerExecutor ..|> ScriptExecutor : implements
+    
+    LocalSubprocessExecutor --> FileProvider : uses
+    LambdaExecutor --> FileProvider : uses
+}
+
+package "Infrastructure Layer - File Providers" INFRASTRUCTURE_COLOR {
+    class LocalFileProvider {
+        +get_file(source: str, destination: str): Path
+        +get_file_async(source: str, destination: str): Path
+        +put_file(source: Path, destination: str): str
+        +put_file_async(source: Path, destination: str): str
+        +cleanup(path: Path): void
+    }
+    
+    class S3FileProvider {
+        -bucket_name: str
+        -region: str
+        +get_file(source: str, destination: str): Path
+        +get_file_async(source: str, destination: str): Path
+        +put_file(source: Path, destination: str): str
+        +put_file_async(source: Path, destination: str): str
+        +cleanup(path: Path): void
+        -_parse_s3_uri(source_path: str): Tuple[str, str]
+    }
+    
+    class HTTPFileProvider {
+        +get_file(source: str, destination: str): Path
+        +get_file_async(source: str, destination: str): Path
+        +put_file(source: Path, destination: str): str
+        +put_file_async(source: Path, destination: str): str
+        +cleanup(path: Path): void
+    }
+    
+    class CompositeFileProvider {
+        -providers: List[FileProvider]
+        -default_provider: FileProvider
+        +get_file(source: str, destination: str): Path
+        +get_file_async(source: str, destination: str): Path
+        +put_file(source: Path, destination: str): str
+        +put_file_async(source: Path, destination: str): str
+        +cleanup(path: Path): void
+        -_select_provider(source_path: str): FileProvider
+        +add_provider(provider: FileProvider): void
+    }
+    
+    LocalFileProvider ..|> FileProvider : implements
+    S3FileProvider ..|> FileProvider : implements
+    HTTPFileProvider ..|> FileProvider : implements
+    CompositeFileProvider ..|> FileProvider : implements
+    
+    CompositeFileProvider --> FileProvider : composes
+    CompositeFileProvider --> LocalFileProvider
+    CompositeFileProvider --> S3FileProvider
+    CompositeFileProvider --> HTTPFileProvider
+}
+
+package "Infrastructure Layer - Log Sinks" INFRASTRUCTURE_COLOR {
+    class StdoutLogSink {
+        -use_stderr_for_errors: bool
+        +emit(level: LogLevel, message: str, metadata: dict): void
+        +close(): void
+    }
+    
+    class SSELogSink {
+        -send_callback: Callable
+        -closed: bool
+        +emit(level: LogLevel, message: str, metadata: dict): void
+        +close(): void
+    }
+    
+    class CompositeLogSink {
+        -sinks: List[LogSink]
+        -closed: bool
+        +emit(level: LogLevel, message: str, metadata: dict): void
+        +close(): void
+        +add_sink(sink: LogSink): void
+        +remove_sink(sink: LogSink): void
+    }
+    
+    StdoutLogSink ..|> LogSink : implements
+    SSELogSink ..|> LogSink : implements
+    CompositeLogSink ..|> LogSink : implements
+    
+    CompositeLogSink --> LogSink : composes
+    CompositeLogSink --> StdoutLogSink
+    CompositeLogSink --> SSELogSink
+}
+
+' Dependency Flow
+note right of RunScriptUseCase
+  **Use Case Pattern**
+  Orchestrates execution workflow
+end note
+
+note right of CompositeFileProvider
+  **Composite Pattern**
+  Routes to appropriate provider
+end note
+
+note right of CompositeLogSink
+  **Composite Pattern**
+  Fan-out to multiple sinks
+end note
+
+note right of LocalSubprocessExecutor
+  **Strategy Pattern**
+  Different execution strategies
+end note
+
+note right of LocalFileProvider
+  **Strategy Pattern**
+  Different file access strategies
+end note
+
+' Dependency Direction
+RunScriptUseCase ..> ScriptExecutor : depends on
+RunScriptUseCase ..> LogSink : depends on
+LocalSubprocessExecutor ..> FileProvider : depends on
+LocalSubprocessExecutor ..> ScriptExecutor : implements
+LocalFileProvider ..> FileProvider : implements
+
+' Clean Architecture Dependency Rule
+note bottom of ScriptExecutor
+  **Clean Architecture Rule:**
+  All dependencies point inward
+  Domain has no external dependencies
+end note
+
+@enduml
+

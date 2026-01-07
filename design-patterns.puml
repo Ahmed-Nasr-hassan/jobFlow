@@ -1,0 +1,171 @@
+@startuml Design Patterns
+
+package "Strategy Pattern" {
+    abstract class ScriptExecutorStrategy {
+        +execute(config: ScriptConfig): ExecutionResult
+    }
+    
+    class LocalSubprocessStrategy {
+        +execute(): ExecutionResult
+    }
+    
+    class LambdaStrategy {
+        +execute(): ExecutionResult
+    }
+    
+    class WorkerStrategy {
+        +execute(): ExecutionResult
+    }
+    
+    ScriptExecutorStrategy <|-- LocalSubprocessStrategy
+    ScriptExecutorStrategy <|-- LambdaStrategy
+    ScriptExecutorStrategy <|-- WorkerStrategy
+    
+    note right of ScriptExecutorStrategy
+        **Strategy Pattern**
+        Different execution strategies
+        can be swapped at runtime
+    end note
+}
+
+package "Strategy Pattern - File Providers" {
+    abstract class FileProviderStrategy {
+        +get_file(source: str, dest: str): Path
+        +put_file(source: Path, dest: str): str
+    }
+    
+    class LocalFileStrategy {
+        +get_file(): Path
+        +put_file(): str
+    }
+    
+    class S3FileStrategy {
+        +get_file(): Path
+        +put_file(): str
+    }
+    
+    class HTTPFileStrategy {
+        +get_file(): Path
+        +put_file(): str
+    }
+    
+    FileProviderStrategy <|-- LocalFileStrategy
+    FileProviderStrategy <|-- S3FileStrategy
+    FileProviderStrategy <|-- HTTPFileStrategy
+}
+
+package "Composite Pattern - Log Sinks" {
+    abstract class LogSinkComponent {
+        +emit(level: LogLevel, message: str): void
+    }
+    
+    class StdoutLogSink {
+        +emit(): void
+    }
+    
+    class SSELogSink {
+        +emit(): void
+    }
+    
+    class CompositeLogSink {
+        -sinks: List[LogSinkComponent]
+        +emit(): void
+        +add_sink(sink: LogSinkComponent): void
+    }
+    
+    LogSinkComponent <|-- StdoutLogSink
+    LogSinkComponent <|-- SSELogSink
+    LogSinkComponent <|-- CompositeLogSink
+    
+    CompositeLogSink *-- LogSinkComponent : contains
+    
+    note right of CompositeLogSink
+        **Composite Pattern**
+        One emit() call forwards
+        to all child sinks (fan-out)
+    end note
+}
+
+package "Composite Pattern - File Providers" {
+    abstract class FileProviderComponent {
+        +get_file(source: str, dest: str): Path
+    }
+    
+    class LocalFileProvider {
+        +get_file(): Path
+    }
+    
+    class S3FileProvider {
+        +get_file(): Path
+    }
+    
+    class CompositeFileProvider {
+        -providers: List[FileProviderComponent]
+        +get_file(): Path
+        -_select_provider(path: str): FileProviderComponent
+    }
+    
+    FileProviderComponent <|-- LocalFileProvider
+    FileProviderComponent <|-- S3FileProvider
+    FileProviderComponent <|-- CompositeFileProvider
+    
+    CompositeFileProvider *-- FileProviderComponent : routes to
+    
+    note right of CompositeFileProvider
+        **Composite Pattern**
+        Routes requests to appropriate
+        provider based on path format
+    end note
+}
+
+package "Adapter Pattern" {
+    class InfrastructureAdapter {
+        +adapts external systems
+    }
+    
+    class LocalSubprocessAdapter {
+        +adapts subprocess module
+    }
+    
+    class S3Adapter {
+        +adapts boto3
+    }
+    
+    class HTTPAdapter {
+        +adapts urllib/aiohttp
+    }
+    
+    InfrastructureAdapter <|-- LocalSubprocessAdapter
+    InfrastructureAdapter <|-- S3Adapter
+    InfrastructureAdapter <|-- HTTPAdapter
+    
+    note right of InfrastructureAdapter
+        **Adapter Pattern**
+        Infrastructure adapters bridge
+        external systems to domain interfaces
+    end note
+}
+
+package "Dependency Injection" {
+    class RunScriptUseCase {
+        -executor: ScriptExecutor
+        -log_sink: LogSink
+        +execute(config: ScriptConfig): ExecutionResult
+    }
+    
+    class ExecutorFactory {
+        +create_executor(type: str): ScriptExecutor
+    }
+    
+    RunScriptUseCase --> ScriptExecutor : injected
+    RunScriptUseCase --> LogSink : injected
+    
+    note right of RunScriptUseCase
+        **Dependency Injection**
+        Dependencies injected via constructor
+        Enables testing and flexibility
+    end note
+}
+
+@enduml
+

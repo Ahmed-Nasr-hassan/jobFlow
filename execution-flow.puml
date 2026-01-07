@@ -1,0 +1,85 @@
+@startuml Execution Flow
+
+actor User
+participant "Use Case\n(RunScriptUseCase)" as UseCase
+participant "Executor\n(LocalSubprocessExecutor)" as Executor
+participant "File Provider\n(CompositeFileProvider)" as FileProvider
+participant "Log Sink\n(CompositeLogSink)" as LogSink
+participant "Script" as Script
+
+User -> UseCase: execute(config)
+activate UseCase
+
+UseCase -> UseCase: Emit start log
+UseCase -> LogSink: emit(INFO, "Starting execution")
+
+UseCase -> Executor: execute(config, log_sink)
+activate Executor
+
+alt File Requirements Exist
+    Executor -> FileProvider: get_file(source, destination)
+    activate FileProvider
+    
+    alt Source is URL
+        FileProvider -> HTTPFileProvider: get_file()
+        HTTPFileProvider -> HTTPFileProvider: Download from URL
+    else Source is S3
+        FileProvider -> S3FileProvider: get_file()
+        S3FileProvider -> S3FileProvider: Download from S3
+    else Source is Local
+        FileProvider -> LocalFileProvider: get_file()
+        LocalFileProvider -> LocalFileProvider: Copy file
+    end
+    
+    FileProvider --> Executor: Path to staged file
+    deactivate FileProvider
+    
+    Executor -> LogSink: emit(INFO, "Staged file")
+end
+
+Executor -> Executor: Build environment
+Executor -> Executor: Create subprocess
+Executor -> Script: Execute Python script
+activate Script
+
+Script -> Script: Process files
+Script -> Script: Generate outputs
+Script --> Executor: Exit code, stdout, stderr
+deactivate Script
+
+Executor -> Executor: Capture output
+Executor -> LogSink: emit(level, log_line)
+LogSink -> LogSink: Forward to all sinks
+
+alt File Outputs Exist
+    Executor -> FileProvider: put_file(source, destination)
+    activate FileProvider
+    
+    alt Destination is S3
+        FileProvider -> S3FileProvider: put_file()
+        S3FileProvider -> S3FileProvider: Upload to S3
+    else Destination is HTTP
+        FileProvider -> HTTPFileProvider: put_file()
+        HTTPFileProvider -> HTTPFileProvider: Upload to HTTP
+    else Destination is Local
+        FileProvider -> LocalFileProvider: put_file()
+        LocalFileProvider -> LocalFileProvider: Copy file
+    end
+    
+    FileProvider --> Executor: Uploaded path/URI
+    deactivate FileProvider
+    
+    Executor -> LogSink: emit(INFO, "Uploaded file")
+end
+
+Executor -> Executor: Cleanup staged files
+Executor -> FileProvider: cleanup(path)
+Executor --> UseCase: ExecutionResult
+deactivate Executor
+
+UseCase -> LogSink: emit(INFO, "Execution completed")
+UseCase --> User: ExecutionResult
+deactivate UseCase
+
+@enduml
+

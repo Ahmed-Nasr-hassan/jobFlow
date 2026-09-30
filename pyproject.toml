@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jobflow"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Production-grade Python script execution library with Clean Architecture"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,7 +12,7 @@ license = {text = "MIT"}
 authors = [
     {name = "JobFlow Contributors"}
 ]
-keywords = ["script-execution", "clean-architecture", "sse", "logging"]
+keywords = ["script-execution", "clean-architecture", "sse", "logging", "executor", "file-provider"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -21,6 +21,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Systems Administration",
 ]
 
 [project.optional-dependencies]
@@ -38,10 +39,20 @@ fastapi = [
 ]
 
 [tool.setuptools]
-packages = ["src"]
+# Find all packages in src/ directory
+# These will be: application, domain, infrastructure, etc.
+packages = {find = {where = ["src"]}}
 
 [tool.setuptools.package-dir]
+# Map root package name "jobflow" to src/ directory
+# This makes "import jobflow" import from src/__init__.py
+# The empty string "" represents the root package name from [project] section
 "" = "src"
+
+[tool.setuptools.dynamic]
+# Read version from src/__init__.py __version__ attribute
+# Since package-dir maps "" to "src", the attribute path is relative to src/
+version = {attr = "__version__"}
 
 [tool.black]
 line-length = 100
